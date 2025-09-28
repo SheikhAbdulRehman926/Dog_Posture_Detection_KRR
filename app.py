@@ -1224,7 +1224,7 @@ html, body, .stApp {
 # =========================
 # STICKY IMAGE GALLERY WIDGET
 # =========================
-    st.markdown("""
+st.markdown("""
 <style>
 .sticky-gallery {
   position: sticky;
@@ -1920,7 +1920,46 @@ with st.sidebar:
             overlay = img.copy(); cv2.drawContours(overlay, [contour], -1, (0,255,0), 2)
             st.markdown("**Segmentation Preview**"); st.image(overlay, use_column_width=True)
             best = top3[0][0]
-    st.info(DISORDER_ADVICE.get(best, "Consult your veterinarian for next steps."))
+            st.info(DISORDER_ADVICE.get(best, "Consult your veterinarian for next steps."))
+            
+            # PDF Download Section
+            st.markdown("---")
+            st.subheader("📄 Download Analysis Report")
+            
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                pet_name = st.text_input("Pet Name (optional)", value="", key="pet_name_pdf")
+            with col2:
+                if st.button("📥 Generate PDF Report", type="primary"):
+                    if 'dist' in st.session_state and 'posture_name' in st.session_state:
+                        try:
+                            # Create PDF report
+                            pdf_path = create_pdf_report(
+                                img, 
+                                overlay, 
+                                st.session_state['dist'], 
+                                pet_name or "Unknown Pet"
+                            )
+                            
+                            # Read PDF file
+                            with open(pdf_path, 'rb') as pdf_file:
+                                pdf_bytes = pdf_file.read()
+                            
+                            # Create download button
+                            st.download_button(
+                                label="📄 Download PDF Report",
+                                data=pdf_bytes,
+                                file_name=f"vetposture_analysis_{pet_name or 'pet'}.pdf",
+                                mime="application/pdf"
+                            )
+                            
+                            # Clean up temporary file
+                            os.unlink(pdf_path)
+                            
+                        except Exception as e:
+                            st.error(f"Error generating PDF: {str(e)}")
+                    else:
+                        st.warning("Please upload an image and run analysis first.")
 
 # =========================
 # ------ TAB: RULES -------
