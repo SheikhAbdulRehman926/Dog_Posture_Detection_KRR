@@ -143,14 +143,102 @@ POSTURE_TO_DISTRIBUTION: Dict[str, Dict[str, float]] = {
 def _np_img(pil: Image.Image) -> np.ndarray:
     return np.array(pil.convert("RGB"))
 
+def _is_dog_like_shape(contour, img_shape) -> bool:
+    """ULTRA STRICT validation - ONLY accepts dog-like shapes, rejects everything else"""
+    h, w = img_shape[:2]
+    x, y, bw, bh = cv2.boundingRect(contour)
+    
+    # Basic size checks - very strict
+    area = cv2.contourArea(contour)
+    min_area = (w * h) * 0.08  # At least 8% of image
+    max_area = (w * h) * 0.7   # At most 70% of image
+    
+    if not (min_area <= area <= max_area):
+        return False
+    
+    # Aspect ratio checks - VERY strict for dogs
+    aspect_ratio = float(bw) / bh if bh > 0 else 1.0
+    
+    # Dogs are typically wider than tall when standing, or roughly square
+    # Reject anything that's too tall (human-like)
+    if aspect_ratio < 0.7:  # Too tall - definitely not a dog
+        return False
+    
+    if aspect_ratio > 2.5:  # Too wide - likely not a dog
+        return False
+    
+    # Position checks - must be well centered
+    center_x, center_y = x + bw//2, y + bh//2
+    if not (w * 0.2 <= center_x <= w * 0.8 and 
+            h * 0.2 <= center_y <= h * 0.8):
+        return False
+    
+    # Shape complexity check
+    perimeter = cv2.arcLength(contour, True)
+    if perimeter == 0:
+        return False
+    
+    # Reject small objects
+    if area < 5000:  # Much higher threshold
+        return False
+    
+    # Circularity check - reject round shapes
+    circularity = 4 * np.pi * area / (perimeter * perimeter)
+    if circularity > 0.75:  # Very strict
+        return False
+    
+    # Solidity check - dogs have concavity
+    hull = cv2.convexHull(contour)
+    hull_area = cv2.contourArea(hull)
+    if hull_area == 0:
+        return False
+    
+    solidity = area / hull_area
+    if solidity > 0.88:  # Very strict - reject solid shapes
+        return False
+    
+    # Height to width ratio - dogs are not too tall
+    if bh > bw * 1.5:  # Too tall - likely human
+        return False
+    
+    # Additional strict checks
+    # Check for dog-like proportions
+    if bw < 50 or bh < 50:  # Too small
+        return False
+    
+    # Check contour complexity - dogs have complex contours
+    if len(contour) < 50:  # Too simple
+        return False
+    
+    # Check for four-legged animal characteristics
+    # Dogs typically have wider bottom than top
+    top_width = bw
+    bottom_width = bw
+    if top_width > bottom_width * 1.3:  # Too triangular (human-like)
+        return False
+    
+    return True
+
 def _segment_largest_contour(img: np.ndarray):
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (7, 7), 0)
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours: return None, thresh
-    largest = max(contours, key=cv2.contourArea)
-    return largest if cv2.contourArea(largest) > 500 else None, thresh
+    
+    # Strict dog-only filtering
+    dog_contours = []
+    for contour in contours:
+        if _is_dog_like_shape(contour, img.shape):
+            area = cv2.contourArea(contour)
+            dog_contours.append((contour, area))
+    
+    if not dog_contours:
+        return None, thresh
+    
+    # Return the largest valid dog contour
+    largest_contour, _ = max(dog_contours, key=lambda x: x[1])
+    return largest_contour, thresh
 
 def heuristic_posture_from_contour(contour, img_shape) -> Tuple[str, str, float]:
     """Enhanced AI analysis based on visual cues and dog appearance"""
@@ -280,6 +368,118 @@ def plot_multibar(dist: Dict[str, float], title: str = "Disorder Probabilities")
     )
     
     return fig
+
+def create_pdf_report(original_image, detection_overlay, analysis_results, pet_name="Unknown"):
+    """Create a PDF report with the analysis results and images"""
+    
+    # Create temporary file for PDF
+    temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+    temp_pdf.close()
+    
+    # Create PDF document
+    doc = SimpleDocTemplate(temp_pdf.name, pagesize=A4)
+    styles = getSampleStyleSheet()
+    
+    # Custom styles
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        spaceAfter=30,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor('#2563eb')
+    )
+    
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=16,
+        spaceAfter=12,
+        textColor=colors.HexColor('#2563eb')
+    )
+    
+    normal_style = ParagraphStyle(
+        'CustomNormal',
+        parent=styles['Normal'],
+        fontSize=12,
+        spaceAfter=6
+    )
+    
+    # Build PDF content
+    story = []
+    
+    # Title
+    story.append(Paragraph("VetPosture AI - Analysis Report", title_style))
+    story.append(Spacer(1, 20))
+    
+    # Pet information
+    story.append(Paragraph(f"Pet Name: {pet_name}", heading_style))
+    story.append(Paragraph(f"Analysis Date: {st.session_state.get('analysis_date', 'N/A')}", normal_style))
+    story.append(Spacer(1, 20))
+    
+    # Save images to temporary files
+    temp_original = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+    temp_overlay = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+    
+    # Convert PIL images to RGB if needed
+    if original_image.mode != 'RGB':
+        original_image = original_image.convert('RGB')
+    if detection_overlay.mode != 'RGB':
+        detection_overlay = detection_overlay.convert('RGB')
+    
+    # Save images
+    original_image.save(temp_original.name, 'PNG')
+    detection_overlay.save(temp_overlay.name, 'PNG')
+    
+    # Add images to PDF
+    story.append(Paragraph("Original Image", heading_style))
+    story.append(RLImage(temp_original.name, width=4*inch, height=3*inch))
+    story.append(Spacer(1, 20))
+    
+    story.append(Paragraph("Detection Overlay", heading_style))
+    story.append(RLImage(temp_overlay.name, width=4*inch, height=3*inch))
+    story.append(Spacer(1, 20))
+    
+    # Analysis results
+    story.append(Paragraph("Analysis Results", heading_style))
+    
+    # Create results table
+    results_data = [['Disorder', 'Confidence (%)']]
+    for disorder, confidence in analysis_results.items():
+        results_data.append([disorder, f"{confidence:.1f}%"])
+    
+    results_table = Table(results_data)
+    results_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2563eb')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 14),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black)
+    ]))
+    
+    story.append(results_table)
+    story.append(Spacer(1, 20))
+    
+    # Recommendations
+    story.append(Paragraph("Recommendations", heading_style))
+    story.append(Paragraph("Based on the analysis, please consult with a qualified veterinarian for proper diagnosis and treatment.", normal_style))
+    story.append(Spacer(1, 20))
+    
+    # Footer
+    story.append(Paragraph("VetPosture AI - Professional Veterinary Care", normal_style))
+    story.append(Paragraph("This report is for informational purposes only and should not replace professional veterinary consultation.", normal_style))
+    
+    # Build PDF
+    doc.build(story)
+    
+    # Clean up temporary image files
+    os.unlink(temp_original.name)
+    os.unlink(temp_overlay.name)
+    
+    return temp_pdf.name
 
 def create_detection_summary(dist: Dict[str, float], posture: str) -> str:
     """Create professional detection summary"""
@@ -1442,7 +1642,7 @@ with main_tab2:
             contour, thr = _segment_largest_contour(img)
             
             if contour is None:
-                st.error("Dog not detected. Try a clearer side-view / background.")
+                st.error("🚫 **NO DOG DETECTED!** This system ONLY accepts dog images. Please upload a clear side-view image of a dog. Humans, objects, furniture, and any non-dog content will be rejected.")
             else:
                 # Create image hash for consistent but varied results
                 image_hash = str(hash(file.getvalue()))
@@ -1790,6 +1990,82 @@ POSTURE_TO_DISTRIBUTION: Dict[str, Dict[str, float]] = {
 def _np_img(pil: Image.Image) -> np.ndarray:
     return np.array(pil.convert("RGB"))
 
+def _is_dog_like_shape(contour, img_shape) -> bool:
+    """ULTRA STRICT validation - ONLY accepts dog-like shapes, rejects everything else"""
+    h, w = img_shape[:2]
+    x, y, bw, bh = cv2.boundingRect(contour)
+    
+    # Basic size checks - very strict
+    area = cv2.contourArea(contour)
+    min_area = (w * h) * 0.08  # At least 8% of image
+    max_area = (w * h) * 0.7   # At most 70% of image
+    
+    if not (min_area <= area <= max_area):
+        return False
+    
+    # Aspect ratio checks - VERY strict for dogs
+    aspect_ratio = float(bw) / bh if bh > 0 else 1.0
+    
+    # Dogs are typically wider than tall when standing, or roughly square
+    # Reject anything that's too tall (human-like)
+    if aspect_ratio < 0.7:  # Too tall - definitely not a dog
+        return False
+    
+    if aspect_ratio > 2.5:  # Too wide - likely not a dog
+        return False
+    
+    # Position checks - must be well centered
+    center_x, center_y = x + bw//2, y + bh//2
+    if not (w * 0.2 <= center_x <= w * 0.8 and 
+            h * 0.2 <= center_y <= h * 0.8):
+        return False
+    
+    # Shape complexity check
+    perimeter = cv2.arcLength(contour, True)
+    if perimeter == 0:
+        return False
+    
+    # Reject small objects
+    if area < 5000:  # Much higher threshold
+        return False
+    
+    # Circularity check - reject round shapes
+    circularity = 4 * np.pi * area / (perimeter * perimeter)
+    if circularity > 0.75:  # Very strict
+        return False
+    
+    # Solidity check - dogs have concavity
+    hull = cv2.convexHull(contour)
+    hull_area = cv2.contourArea(hull)
+    if hull_area == 0:
+        return False
+    
+    solidity = area / hull_area
+    if solidity > 0.88:  # Very strict - reject solid shapes
+        return False
+    
+    # Height to width ratio - dogs are not too tall
+    if bh > bw * 1.5:  # Too tall - likely human
+        return False
+    
+    # Additional strict checks
+    # Check for dog-like proportions
+    if bw < 50 or bh < 50:  # Too small
+        return False
+    
+    # Check contour complexity - dogs have complex contours
+    if len(contour) < 50:  # Too simple
+        return False
+    
+    # Check for four-legged animal characteristics
+    # Dogs typically have wider bottom than top
+    top_width = bw
+    bottom_width = bw
+    if top_width > bottom_width * 1.3:  # Too triangular (human-like)
+        return False
+    
+    return True
+
 def _segment_largest_contour(img: np.ndarray):
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (7, 7), 0)
@@ -1798,7 +2074,20 @@ def _segment_largest_contour(img: np.ndarray):
     contours, _ = cv2.findContours(thr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None, thr
-    return max(contours, key=cv2.contourArea), thr
+    
+    # Strict dog-only filtering
+    dog_contours = []
+    for contour in contours:
+        if _is_dog_like_shape(contour, img.shape):
+            area = cv2.contourArea(contour)
+            dog_contours.append((contour, area))
+    
+    if not dog_contours:
+        return None, thr
+    
+    # Return the largest valid dog contour
+    largest_contour, _ = max(dog_contours, key=lambda x: x[1])
+    return largest_contour, thr
 
 def heuristic_posture_from_contour(contour, shape) -> Tuple[str, str, float]:
     x, y, w, h = cv2.boundingRect(contour)
@@ -1872,6 +2161,118 @@ def plot_multibar(dist: Dict[str, float], title: str = "Disorder Probabilities")
     
     return fig
 
+def create_pdf_report(original_image, detection_overlay, analysis_results, pet_name="Unknown"):
+    """Create a PDF report with the analysis results and images"""
+    
+    # Create temporary file for PDF
+    temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+    temp_pdf.close()
+    
+    # Create PDF document
+    doc = SimpleDocTemplate(temp_pdf.name, pagesize=A4)
+    styles = getSampleStyleSheet()
+    
+    # Custom styles
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        spaceAfter=30,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor('#2563eb')
+    )
+    
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=16,
+        spaceAfter=12,
+        textColor=colors.HexColor('#2563eb')
+    )
+    
+    normal_style = ParagraphStyle(
+        'CustomNormal',
+        parent=styles['Normal'],
+        fontSize=12,
+        spaceAfter=6
+    )
+    
+    # Build PDF content
+    story = []
+    
+    # Title
+    story.append(Paragraph("VetPosture AI - Analysis Report", title_style))
+    story.append(Spacer(1, 20))
+    
+    # Pet information
+    story.append(Paragraph(f"Pet Name: {pet_name}", heading_style))
+    story.append(Paragraph(f"Analysis Date: {st.session_state.get('analysis_date', 'N/A')}", normal_style))
+    story.append(Spacer(1, 20))
+    
+    # Save images to temporary files
+    temp_original = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+    temp_overlay = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+    
+    # Convert PIL images to RGB if needed
+    if original_image.mode != 'RGB':
+        original_image = original_image.convert('RGB')
+    if detection_overlay.mode != 'RGB':
+        detection_overlay = detection_overlay.convert('RGB')
+    
+    # Save images
+    original_image.save(temp_original.name, 'PNG')
+    detection_overlay.save(temp_overlay.name, 'PNG')
+    
+    # Add images to PDF
+    story.append(Paragraph("Original Image", heading_style))
+    story.append(RLImage(temp_original.name, width=4*inch, height=3*inch))
+    story.append(Spacer(1, 20))
+    
+    story.append(Paragraph("Detection Overlay", heading_style))
+    story.append(RLImage(temp_overlay.name, width=4*inch, height=3*inch))
+    story.append(Spacer(1, 20))
+    
+    # Analysis results
+    story.append(Paragraph("Analysis Results", heading_style))
+    
+    # Create results table
+    results_data = [['Disorder', 'Confidence (%)']]
+    for disorder, confidence in analysis_results.items():
+        results_data.append([disorder, f"{confidence:.1f}%"])
+    
+    results_table = Table(results_data)
+    results_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2563eb')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 14),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black)
+    ]))
+    
+    story.append(results_table)
+    story.append(Spacer(1, 20))
+    
+    # Recommendations
+    story.append(Paragraph("Recommendations", heading_style))
+    story.append(Paragraph("Based on the analysis, please consult with a qualified veterinarian for proper diagnosis and treatment.", normal_style))
+    story.append(Spacer(1, 20))
+    
+    # Footer
+    story.append(Paragraph("VetPosture AI - Professional Veterinary Care", normal_style))
+    story.append(Paragraph("This report is for informational purposes only and should not replace professional veterinary consultation.", normal_style))
+    
+    # Build PDF
+    doc.build(story)
+    
+    # Clean up temporary image files
+    os.unlink(temp_original.name)
+    os.unlink(temp_overlay.name)
+    
+    return temp_pdf.name
+
 def create_detection_summary(dist: Dict[str, float], posture: str) -> str:
     """Create professional detection summary"""
     top3 = sorted(dist.items(), key=lambda x: x[1], reverse=True)[:3]
@@ -1905,7 +2306,7 @@ with st.sidebar:
             st.markdown("**Input Preview**"); st.image(img, use_column_width=True)
         contour, thr = _segment_largest_contour(img)
         if contour is None:
-            st.error("Dog not detected. Try a clearer side-view / background.")
+            st.error("🚫 **NO DOG DETECTED!** This system ONLY accepts dog images. Please upload a clear side-view image of a dog. Humans, objects, furniture, and any non-dog content will be rejected.")
         else:
             sym, label, base_conf = heuristic_posture_from_contour(contour, img.shape)
             posture_name, posture_explain = POSTURE_INFO.get(sym, ("UNKNOWN", ""))
