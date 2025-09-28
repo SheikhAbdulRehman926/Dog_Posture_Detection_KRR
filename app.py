@@ -1698,7 +1698,7 @@ with main_tab5:
           <p style="color: #475569; margin: 0.5rem 0;">Email: sheikhabdulrehmana36@gmail.com</p>
           <p style="color: #475569; margin: 0.5rem 0;">Phone: 03121800103</p>
           <p style="color: #475569; margin: 0.5rem 0;">24/7 Online Support</p>
-          <p style="color: #475569; margin: 0.5rem 0;">Website: www.vetpostureai.com</p>
+          <p style="color: #475569; margin: 0.5rem 0;">Website: https://dogposturedetection.streamlit.app/</p>
         </div>
         """, unsafe_allow_html=True)
     
